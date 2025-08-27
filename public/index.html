@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EHR - Patient Chart</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .patient-card { border: 1px solid #ddd; padding: 20px; margin: 20px 0; border-radius: 8px; }
+        .call-button { background: #007bff; color: white; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; font-size: 16px; }
+        .call-button:hover { background: #0056b3; }
+        .call-button:disabled { background: #ccc; cursor: not-allowed; }
+        .status { margin: 10px 0; padding: 10px; border-radius: 4px; }
+        .status.success { background: #d4edda; color: #155724; }
+        .status.error { background: #f8d7da; color: #721c24; }
+        .call-logs { margin-top: 20px; }
+        .log-entry { padding: 8px; border-bottom: 1px solid #eee; }
+        #webrtc-controls { margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <h1>Electronic Health Record - Patient Chart</h1>
+    
+    <div class="patient-card">
+        <h2>Patient: John Doe</h2>
+        <p><strong>Patient ID:</strong> PAT001</p>
+        <p><strong>Phone:</strong> +50377246540</p>
+        <p><strong>Provider:</strong> Dr. Smith (PROV001)</p>
+        
+        <button id="callButton" class="call-button">📞 Call Patient</button>
+        
+        <div id="status"></div>
+    </div>
+
+    <div id="webrtc-controls" style="display: none;">
+        <h3>Provider Call Interface (LiveKit)</h3>
+        <button id="connectProvider" class="call-button">Join Call</button>
+        <button id="hangupProvider" class="call-button" style="background: #dc3545;">Leave Call</button>
+        <div id="callStatus"></div>
+        
+        <div style="margin-top: 15px;">
+            <button id="startVideo" class="call-button">📹 Enable Video</button>
+            <button id="endVideo" class="call-button" style="background: #dc3545;">End Call</button>
+        </div>
+        
+        <div id="video-room" style="margin-top: 15px; min-height: 300px; background: #f8f9fa; border: 1px solid #ddd; border-radius: 8px; padding: 10px; display: none;"></div>
+    </div>
+
+    <div class="call-logs">
+        <h3>Call History</h3>
+        <div id="callLogs"></div>
+    </div>
+
+    <script src="https://sdk.twilio.com/js/client/releases/1.14.0/twilio.min.js"></script>
+    <script src="https://unpkg.com/livekit-client/dist/livekit-client.umd.js"></script>
+    <script>
+        const patientData = {
+            patientId: 'PAT001',
+            patientPhone: '+50377246540', // Replace with actual patient phone
+            providerId: 'PROV001'
+        };
+
+        let videoRoom = null;
+        let currentCallId = null;
+        let currentRoomName = null;
+
+        // Check for active calls
+        async function checkActiveCalls() {
+            try {
+                const response = await fetch(`/api/active-calls/${patientData.providerId}`);
+                const activeCalls = await response.json();
+                
+                if (activeCalls.length > 0) {
+                    const activeCall = activeCalls[0];
+                    currentCallId = activeCall.callId;
+                    currentRoomName = activeCall.roomName;
+                    document.getElementById('webrtc-controls').style.display = 'block';
+                    updateCallStatus(`Active call found - Room: ${activeCall.roomName}`);
+                }
+            } catch (error) {
+                console.error('Failed to check active calls:', error);
+            }
+        }
+
+        // Call patient function
+        async function callPatient() {
+            const button = document.getElementById('callButton');
+            button.disabled = true;
+            button.textContent = 'Calling...';
+            
+            try {
+                const response = await fetch('/api/call-patient', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(patientData)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    currentCallId = result.callId;
+                    currentRoomName = result.roomName;
+                    showStatus(`Call initiated to patient. Call ID: ${result.callId}`, 'success');
+                    document.getElementById('webrtc-controls').style.display = 'block';
+                    updateCallStatus(`Call initiated - Room: ${result.roomName}`);
+                    loadCallLogs();
+                } else {
+                    showStatus(`Error: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showStatus(`Error: ${error.message}`, 'error');
+            } finally {
+                button.disabled = false;
+                button.textContent = '📞 Call Patient';
+            }
+        }
+
+        // Join call via LiveKit
+        async function joinCall() {
+            if (!currentCallId) {
+                updateCallStatus('No active call to join');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/join-call', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        callId: currentCallId,
+                        providerId: patientData.providerId
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    await connectToLiveKitRoom(data.token, data.wsUrl, data.roomName);
+                    updateCallStatus('Connected to patient call via LiveKit');
+                } else {
+                    updateCallStatus(`Failed to join call: ${data.error}`);
+                }
+            } catch (error) {
+                updateCallStatus(`Error joining call: ${error.message}`);
+            }
+        }
+
+        // Hang up call
+        async function hangupCall() {
+            if (videoRoom) {
+                await videoRoom.disconnect();
+                videoRoom = null;
+                updateCallStatus('Disconnected from call');
+                document.getElementById('video-room').innerHTML = '';
+            }
+            currentCallId = null;
+            currentRoomName = null;
+        }
+
+        // Load call logs
+        async function loadCallLogs() {
+            try {
+                const response = await fetch(`/api/call-logs/${patientData.patientId}`);
+                const logs = await response.json();
+                
+                const logsContainer = document.getElementById('callLogs');
+                logsContainer.innerHTML = logs.map(log => 
+                    `<div class="log-entry">
+                        <strong>${new Date(log.timestamp).toLocaleString()}</strong> - 
+                        Status: ${log.status} (ID: ${log.id})
+                    </div>`
+                ).join('');
+            } catch (error) {
+                console.error('Failed to load call logs:', error);
+            }
+        }
+
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        function updateCallStatus(message) {
+            document.getElementById('callStatus').textContent = message;
+        }
+
+        // Connect to LiveKit room
+        async function connectToLiveKitRoom(token, wsUrl, roomName) {
+            try {
+                videoRoom = new LiveKitClient.Room();
+                
+                videoRoom.on(LiveKitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+                    if (track.kind === 'video' || track.kind === 'audio') {
+                        const element = track.attach();
+                        element.style.maxWidth = '300px';
+                        element.style.margin = '10px';
+                        document.getElementById('video-room').appendChild(element);
+                    }
+                });
+                
+                videoRoom.on(LiveKitClient.RoomEvent.ParticipantConnected, (participant) => {
+                    updateCallStatus(`Participant joined: ${participant.identity}`);
+                });
+                
+                await videoRoom.connect(wsUrl, token);
+                
+                // Enable camera and microphone
+                const videoTrack = await LiveKitClient.createLocalVideoTrack();
+                const audioTrack = await LiveKitClient.createLocalAudioTrack();
+                
+                await videoRoom.localParticipant.publishTrack(videoTrack);
+                await videoRoom.localParticipant.publishTrack(audioTrack);
+                
+                const localVideo = videoTrack.attach();
+                localVideo.style.maxWidth = '300px';
+                localVideo.style.margin = '10px';
+                localVideo.style.border = '2px solid #007bff';
+                document.getElementById('video-room').appendChild(localVideo);
+                
+                document.getElementById('video-room').style.display = 'block';
+                showStatus(`Connected to LiveKit room: ${roomName}`, 'success');
+                
+            } catch (error) {
+                showStatus(`LiveKit connection error: ${error.message}`, 'error');
+            }
+        }
+        
+        // Enable video in current call
+        async function enableVideo() {
+            if (!videoRoom) {
+                showStatus('Not connected to a call room', 'error');
+                return;
+            }
+            
+            try {
+                const videoTrack = await LiveKitClient.createLocalVideoTrack();
+                await videoRoom.localParticipant.publishTrack(videoTrack);
+                
+                const localVideo = videoTrack.attach();
+                localVideo.style.maxWidth = '300px';
+                localVideo.style.margin = '10px';
+                localVideo.style.border = '2px solid #007bff';
+                document.getElementById('video-room').appendChild(localVideo);
+                
+                showStatus('Video enabled', 'success');
+            } catch (error) {
+                showStatus(`Video error: ${error.message}`, 'error');
+            }
+        }
+
+        // Event listeners
+        document.getElementById('callButton').addEventListener('click', callPatient);
+        document.getElementById('connectProvider').addEventListener('click', joinCall);
+        document.getElementById('hangupProvider').addEventListener('click', hangupCall);
+        document.getElementById('startVideo').addEventListener('click', enableVideo);
+        document.getElementById('endVideo').addEventListener('click', hangupCall);
+
+        // Initialize on page load
+        window.addEventListener('load', () => {
+            checkActiveCalls();
+            loadCallLogs();
+            
+            // Poll for active calls every 5 seconds
+            setInterval(checkActiveCalls, 5000);
+        });
+    </script>
+</body>
+</html>
