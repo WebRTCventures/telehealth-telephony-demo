@@ -4,6 +4,13 @@ const cors = require('cors');
 const { AccessToken, RoomServiceClient, CreateRoomRequest } = require('livekit-server-sdk');
 require('dotenv').config();
 
+// Simple logger
+const log = {
+  info: (msg, data = {}) => console.log(`[INFO] ${new Date().toISOString()} - ${msg}`, data),
+  error: (msg, error = {}) => console.error(`[ERROR] ${new Date().toISOString()} - ${msg}`, error),
+  warn: (msg, data = {}) => console.warn(`[WARN] ${new Date().toISOString()} - ${msg}`, data)
+};
+
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -29,14 +36,20 @@ const roomService = new RoomServiceClient(
 app.post('/api/call-patient', async (req, res) => {
   const { patientId, patientPhone, providerId } = req.body;
   
+  log.info('Initiating call to patient', { patientId, patientPhone, providerId });
+  
   try {
     // Create LiveKit room for the call
     const roomName = `call-${patientId}-${Date.now()}`;
+    log.info('Creating LiveKit room', { roomName });
+    
     const room = await roomService.createRoom({
       name: roomName,
       emptyTimeout: 300, // 5 minutes
       maxParticipants: 10
     });
+    
+    log.info('LiveKit room created successfully', { roomName, roomId: room.name });
 
     // Initiate Twilio call with SIP integration
     const call = await client.calls.create({
@@ -46,6 +59,8 @@ app.post('/api/call-patient', async (req, res) => {
       statusCallback: `${req.protocol}://${req.get('host')}/api/call-status`,
       statusCallbackEvent: ['initiated', 'answered', 'completed']
     });
+    
+    log.info('Twilio call initiated', { callSid: call.sid, to: patientPhone, roomName });
 
     const callLog = {
       id: call.sid,
@@ -67,7 +82,7 @@ app.post('/api/call-patient', async (req, res) => {
       message: 'Call initiated to patient'
     });
   } catch (error) {
-    console.error('Call initiation error:', error);
+    log.error('Call initiation failed', { patientId, error: error.message });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -75,13 +90,16 @@ app.post('/api/call-patient', async (req, res) => {
 // TwiML response to connect patient to LiveKit via SIP
 app.post('/api/twiml/connect-sip', (req, res) => {
   const { room } = req.query;
-  const twiml = new twilio.twiml.VoiceResponse();
+  const sipUri = `sip:${room}@${process.env.LIVEKIT_SIP_DOMAIN}`;
   
+  log.info('Generating TwiML for SIP connection', { room, sipUri });
+  
+  const twiml = new twilio.twiml.VoiceResponse();
   twiml.say('Connecting you to your healthcare provider.');
   
   // Connect directly to LiveKit SIP endpoint
   const dial = twiml.dial({ timeout: 30 });
-  dial.sip(`sip:${room}@${process.env.LIVEKIT_SIP_DOMAIN}`);
+  dial.sip(sipUri);
   
   res.type('text/xml');
   res.send(twiml.toString());
@@ -89,6 +107,8 @@ app.post('/api/twiml/connect-sip', (req, res) => {
 
 // Handle call completion
 app.post('/api/call-completed', (req, res) => {
+  log.info('Call completed, generating goodbye TwiML');
+  
   const twiml = new twilio.twiml.VoiceResponse();
   twiml.say('Thank you for using our telehealth service. Goodbye.');
   twiml.hangup();
@@ -101,10 +121,15 @@ app.post('/api/call-completed', (req, res) => {
 app.post('/api/call-status', async (req, res) => {
   const { CallSid, CallStatus } = req.body;
   
+  log.info('Call status update received', { CallSid, CallStatus });
+  
   const callLog = callLogs.find(log => log.id === CallSid);
   if (callLog) {
     callLog.status = CallStatus;
     callLog.lastUpdated = new Date().toISOString();
+    log.info('Updated call log', { CallSid, newStatus: CallStatus });
+  } else {
+    log.warn('Call log not found for status update', { CallSid });
   }
   
   // Clean up LiveKit room when call ends
@@ -112,11 +137,13 @@ app.post('/api/call-status', async (req, res) => {
     const callInfo = activeCalls.get(CallSid);
     if (callInfo) {
       try {
+        log.info('Cleaning up call resources', { CallSid, roomName: callInfo.roomName });
         // Optionally end the LiveKit room
         // await roomService.deleteRoom(callInfo.roomName);
         activeCalls.delete(CallSid);
+        log.info('Call cleanup completed', { CallSid });
       } catch (error) {
-        console.error('Error cleaning up room:', error);
+        log.error('Error cleaning up room', { CallSid, error: error.message });
       }
     }
   }
@@ -127,13 +154,19 @@ app.post('/api/call-status', async (req, res) => {
 // Get call logs for EHR
 app.get('/api/call-logs/:patientId', (req, res) => {
   const { patientId } = req.params;
+  log.info('Retrieving call logs', { patientId });
+  
   const logs = callLogs.filter(log => log.patientId === patientId);
+  log.info('Call logs retrieved', { patientId, logCount: logs.length });
+  
   res.json(logs);
 });
 
 // Get active calls for provider dashboard
 app.get('/api/active-calls/:providerId', (req, res) => {
   const { providerId } = req.params;
+  log.info('Retrieving active calls for provider', { providerId });
+  
   const providerCalls = [];
   
   for (const [callId, callInfo] of activeCalls.entries()) {
@@ -147,6 +180,7 @@ app.get('/api/active-calls/:providerId', (req, res) => {
     }
   }
   
+  log.info('Active calls retrieved', { providerId, activeCallCount: providerCalls.length });
   res.json(providerCalls);
 });
 
@@ -154,7 +188,10 @@ app.get('/api/active-calls/:providerId', (req, res) => {
 app.post('/api/livekit-token', (req, res) => {
   const { participantName, roomName, participantType = 'provider' } = req.body;
   
+  log.info('Generating LiveKit token', { participantName, roomName, participantType });
+  
   if (!process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET) {
+    log.error('LiveKit credentials not configured');
     return res.status(500).json({ error: 'LiveKit credentials not configured' });
   }
 
@@ -170,6 +207,8 @@ app.post('/api/livekit-token', (req, res) => {
     canSubscribe: true,
     canPublishData: true
   });
+  
+  log.info('LiveKit token generated successfully', { participantName, roomName });
 
   res.json({ 
     token: token.toJwt(),
@@ -181,12 +220,16 @@ app.post('/api/livekit-token', (req, res) => {
 // Get call room info for provider to join
 app.get('/api/call-room/:callId', (req, res) => {
   const { callId } = req.params;
+  log.info('Retrieving call room info', { callId });
+  
   const callInfo = activeCalls.get(callId);
   
   if (!callInfo) {
+    log.warn('Call room not found', { callId });
     return res.status(404).json({ error: 'Call not found' });
   }
   
+  log.info('Call room info retrieved', { callId, roomName: callInfo.roomName });
   res.json(callInfo);
 });
 
@@ -194,14 +237,25 @@ app.get('/api/call-room/:callId', (req, res) => {
 app.post('/api/join-call', async (req, res) => {
   const { callId, providerId } = req.body;
   
+  log.info('Provider attempting to join call', { callId, providerId });
+  
   const callInfo = activeCalls.get(callId);
   if (!callInfo) {
+    log.warn('Call not found for provider join', { callId, providerId });
     return res.status(404).json({ error: 'Call not found or ended' });
   }
   
   try {
+    const participantIdentity = `provider-${providerId}`;
+    log.info('Generating token for provider to join call', { 
+      callId, 
+      providerId, 
+      roomName: callInfo.roomName,
+      participantIdentity 
+    });
+    
     const token = new AccessToken(process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET, {
-      identity: `provider-${providerId}`,
+      identity: participantIdentity,
       ttl: '1h'
     });
 
@@ -212,6 +266,8 @@ app.post('/api/join-call', async (req, res) => {
       canSubscribe: true,
       canPublishData: true
     });
+    
+    log.info('Provider successfully joined call', { callId, providerId, roomName: callInfo.roomName });
 
     res.json({
       success: true,
@@ -220,6 +276,7 @@ app.post('/api/join-call', async (req, res) => {
       roomName: callInfo.roomName
     });
   } catch (error) {
+    log.error('Failed to generate token for provider join', { callId, providerId, error: error.message });
     res.status(500).json({ error: error.message });
   }
 });
@@ -227,10 +284,19 @@ app.post('/api/join-call', async (req, res) => {
 // Get video sessions
 app.get('/api/video-sessions/:patientId', (req, res) => {
   const { patientId } = req.params;
+  log.info('Retrieving video sessions', { patientId });
+  
   const sessions = videoSessions.filter(session => session.patientId === patientId);
+  log.info('Video sessions retrieved', { patientId, sessionCount: sessions.length });
+  
   res.json(sessions);
 });
 
 app.listen(port, () => {
-  console.log(`Telehealth telephony demo running on port ${port}`);
+  log.info(`Telehealth telephony demo server started`, { port, env: process.env.NODE_ENV || 'development' });
+  log.info('Configuration check', {
+    twilioConfigured: !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+    livekitConfigured: !!(process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET),
+    sipDomain: process.env.LIVEKIT_SIP_DOMAIN || 'sip.livekit.cloud'
+  });
 });
