@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>EHR - Patient Chart</title>
+    <title>Telehealth Provider Dashboard - Incoming Calls</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
         .patient-card { border: 1px solid #ddd; padding: 20px; margin: 20px 0; border-radius: 8px; }
@@ -19,17 +19,21 @@
     </style>
 </head>
 <body>
-    <h1>Electronic Health Record - Patient Chart</h1>
+    <h1>Telehealth Provider Dashboard</h1>
+    <p style="color: #666; margin-bottom: 20px;">Patients call your clinic number and you answer directly in your browser</p>
     
     <div class="patient-card">
-        <h2>Patient: John Doe</h2>
-        <p><strong>Patient ID:</strong> PAT001</p>
-        <p><strong>Phone:</strong> +50377246540</p>
+        <h2>Telehealth Provider Dashboard</h2>
         <p><strong>Provider:</strong> Dr. Smith (PROV001)</p>
-        
-        <button id="callButton" class="call-button">📞 Call Patient</button>
+        <p><strong>Clinic Phone:</strong> +1234567890</p>
+        <p><em>Patients can call the clinic number above to connect with you</em></p>
         
         <div id="status"></div>
+    </div>
+
+    <div class="patient-card">
+        <h3>📞 Incoming Calls</h3>
+        <div id="incomingCalls">No incoming calls</div>
     </div>
 
     <div id="webrtc-controls" style="display: none;">
@@ -54,95 +58,100 @@
     <script src="https://sdk.twilio.com/js/client/releases/1.14.0/twilio.min.js"></script>
     <script src="https://unpkg.com/livekit-client/dist/livekit-client.umd.js"></script>
     <script>
-        const patientData = {
-            patientId: 'PAT001',
-            patientPhone: '+50377246540', // Replace with actual patient phone
+        const providerData = {
             providerId: 'PROV001'
         };
 
         let videoRoom = null;
-        let currentCallId = null;
+        let currentCallSid = null;
         let currentRoomName = null;
+
+        // Check for incoming calls
+        async function checkIncomingCalls() {
+            try {
+                const response = await fetch('/api/incoming-calls');
+                const incomingCalls = await response.json();
+                
+                const incomingCallsDiv = document.getElementById('incomingCalls');
+                
+                if (incomingCalls.length === 0) {
+                    incomingCallsDiv.innerHTML = 'No incoming calls';
+                } else {
+                    incomingCallsDiv.innerHTML = incomingCalls.map(call => 
+                        `<div style="padding: 10px; border: 1px solid #007bff; margin: 5px 0; border-radius: 4px;">
+                            <strong>📞 Patient calling from: ${call.patientPhone}</strong><br>
+                            <small>Waiting: ${call.waitTime}s</small><br>
+                            <button onclick="answerCall('${call.callSid}')" class="call-button" style="margin-top: 5px;">Answer Call</button>
+                        </div>`
+                    ).join('');
+                }
+            } catch (error) {
+                console.error('Failed to check incoming calls:', error);
+            }
+        }
 
         // Check for active calls
         async function checkActiveCalls() {
             try {
-                const response = await fetch(`/api/active-calls/${patientData.providerId}`);
+                const response = await fetch('/api/active-calls');
                 const activeCalls = await response.json();
                 
                 if (activeCalls.length > 0) {
                     const activeCall = activeCalls[0];
-                    currentCallId = activeCall.callId;
+                    currentCallSid = activeCall.callSid;
                     currentRoomName = activeCall.roomName;
                     document.getElementById('webrtc-controls').style.display = 'block';
-                    updateCallStatus(`Active call found - Room: ${activeCall.roomName}`);
+                    updateCallStatus(`Active call with ${activeCall.patientPhone} - Room: ${activeCall.roomName}`);
                 }
             } catch (error) {
                 console.error('Failed to check active calls:', error);
             }
         }
 
-        // Call patient function
-        async function callPatient() {
-            const button = document.getElementById('callButton');
-            button.disabled = true;
-            button.textContent = 'Calling...';
-            
+        // Answer incoming call
+        async function answerCall(callSid) {
             try {
-                const response = await fetch('/api/call-patient', {
+                showStatus('Answering call...', 'success');
+                
+                const response = await fetch('/api/answer-call', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(patientData)
+                    body: JSON.stringify({
+                        callSid: callSid,
+                        providerId: providerData.providerId
+                    })
                 });
                 
                 const result = await response.json();
                 
                 if (result.success) {
-                    currentCallId = result.callId;
+                    currentCallSid = callSid;
                     currentRoomName = result.roomName;
-                    showStatus(`Call initiated to patient. Call ID: ${result.callId}`, 'success');
+                    
+                    showStatus(`Call answered - Patient: ${result.patientPhone}`, 'success');
                     document.getElementById('webrtc-controls').style.display = 'block';
-                    updateCallStatus(`Call initiated - Room: ${result.roomName}`);
+                    updateCallStatus(`Connected to patient ${result.patientPhone}`);
+                    
+                    // Automatically join the LiveKit room
+                    await connectToLiveKitRoom(result.token, result.wsUrl, result.roomName);
+                    
                     loadCallLogs();
                 } else {
-                    showStatus(`Error: ${result.error}`, 'error');
+                    showStatus(`Error answering call: ${result.error}`, 'error');
                 }
             } catch (error) {
                 showStatus(`Error: ${error.message}`, 'error');
-            } finally {
-                button.disabled = false;
-                button.textContent = '📞 Call Patient';
             }
         }
 
-        // Join call via LiveKit
+        // Join call via LiveKit (for manual connection)
         async function joinCall() {
-            if (!currentCallId) {
+            if (!currentCallSid) {
                 updateCallStatus('No active call to join');
                 return;
             }
             
-            try {
-                const response = await fetch('/api/join-call', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        callId: currentCallId,
-                        providerId: patientData.providerId
-                    })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    await connectToLiveKitRoom(data.token, data.wsUrl, data.roomName);
-                    updateCallStatus('Connected to patient call via LiveKit');
-                } else {
-                    updateCallStatus(`Failed to join call: ${data.error}`);
-                }
-            } catch (error) {
-                updateCallStatus(`Error joining call: ${error.message}`);
-            }
+            updateCallStatus('Already connected to call');
         }
 
         // Hang up call
@@ -152,22 +161,24 @@
                 videoRoom = null;
                 updateCallStatus('Disconnected from call');
                 document.getElementById('video-room').innerHTML = '';
+                document.getElementById('video-room').style.display = 'none';
             }
-            currentCallId = null;
+            currentCallSid = null;
             currentRoomName = null;
+            document.getElementById('webrtc-controls').style.display = 'none';
         }
 
         // Load call logs
         async function loadCallLogs() {
             try {
-                const response = await fetch(`/api/call-logs/${patientData.patientId}`);
+                const response = await fetch('/api/call-logs');
                 const logs = await response.json();
                 
                 const logsContainer = document.getElementById('callLogs');
                 logsContainer.innerHTML = logs.map(log => 
                     `<div class="log-entry">
                         <strong>${new Date(log.timestamp).toLocaleString()}</strong> - 
-                        Status: ${log.status} (ID: ${log.id})
+                        Patient: ${log.patientPhone} | Status: ${log.status} | Duration: ${log.duration || 'N/A'}s
                     </div>`
                 ).join('');
             } catch (error) {
@@ -249,7 +260,6 @@
         }
 
         // Event listeners
-        document.getElementById('callButton').addEventListener('click', callPatient);
         document.getElementById('connectProvider').addEventListener('click', joinCall);
         document.getElementById('hangupProvider').addEventListener('click', hangupCall);
         document.getElementById('startVideo').addEventListener('click', enableVideo);
@@ -257,9 +267,12 @@
 
         // Initialize on page load
         window.addEventListener('load', () => {
+            checkIncomingCalls();
             checkActiveCalls();
             loadCallLogs();
             
+            // Poll for incoming calls every 2 seconds
+            setInterval(checkIncomingCalls, 2000);
             // Poll for active calls every 5 seconds
             setInterval(checkActiveCalls, 5000);
         });

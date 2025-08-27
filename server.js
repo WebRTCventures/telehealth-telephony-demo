@@ -23,6 +23,7 @@ const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TO
 // In-memory call logs (replace with database in production)
 const callLogs = [];
 const videoSessions = [];
+const incomingCalls = new Map(); // Track incoming calls waiting for provider
 const activeCalls = new Map(); // Track active calls and their LiveKit rooms
 
 // Initialize LiveKit Room Service Client
@@ -32,16 +33,16 @@ const roomService = new RoomServiceClient(
   process.env.LIVEKIT_API_SECRET
 );
 
-// Initiate call to patient
-app.post('/api/call-patient', async (req, res) => {
-  const { patientId, patientPhone, providerId } = req.body;
+// Handle incoming calls from patients
+app.post('/api/incoming-call', async (req, res) => {
+  const { CallSid, From, To } = req.body;
   
-  log.info('Initiating call to patient', { patientId, patientPhone, providerId });
+  log.info('Incoming call received', { CallSid, From, To });
   
   try {
-    // Create LiveKit room for the call
-    const roomName = `call-${patientId}-${Date.now()}`;
-    log.info('Creating LiveKit room', { roomName });
+    // Create LiveKit room for the incoming call
+    const roomName = `incoming-${CallSid}`;
+    log.info('Creating LiveKit room for incoming call', { roomName, CallSid });
     
     const room = await roomService.createRoom({
       name: roomName,
@@ -49,60 +50,81 @@ app.post('/api/call-patient', async (req, res) => {
       maxParticipants: 10
     });
     
-    log.info('LiveKit room created successfully', { roomName, roomId: room.name });
+    log.info('LiveKit room created for incoming call', { roomName, CallSid });
 
-    // Initiate Twilio call with SIP integration
-    const call = await client.calls.create({
-      url: `${req.protocol}://${req.get('host')}/api/twiml/connect-sip?room=${roomName}`,
-      to: patientPhone,
-      from: process.env.TWILIO_PHONE_NUMBER,
-      statusCallback: `${req.protocol}://${req.get('host')}/api/call-status`,
-      statusCallbackEvent: ['initiated', 'answered', 'completed']
-    });
-    
-    log.info('Twilio call initiated', { callSid: call.sid, to: patientPhone, roomName });
-
-    const callLog = {
-      id: call.sid,
-      patientId,
-      providerId,
-      patientPhone,
+    // Store incoming call info
+    const callInfo = {
+      callSid: CallSid,
+      patientPhone: From,
+      clinicPhone: To,
       roomName,
-      status: 'initiated',
+      status: 'ringing',
       timestamp: new Date().toISOString()
     };
     
-    callLogs.push(callLog);
-    activeCalls.set(call.sid, { roomName, patientId, providerId });
+    incomingCalls.set(CallSid, callInfo);
     
-    res.json({ 
-      success: true, 
-      callId: call.sid,
-      roomName,
-      message: 'Call initiated to patient'
-    });
+    // Generate TwiML to put caller on hold while waiting for provider
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say('Thank you for calling our telehealth clinic. Please hold while we connect you to a healthcare provider.');
+    twiml.play({ loop: 10 }, 'https://com-twilio-sounds-music.s3.amazonaws.com/MARKOVICHAMP-Borghestral.wav');
+    
+    // Set up webhook for when provider answers
+    twiml.redirect(`/api/twiml/wait-for-provider?callSid=${CallSid}`);
+    
+    res.type('text/xml');
+    res.send(twiml.toString());
+    
   } catch (error) {
-    log.error('Call initiation failed', { patientId, error: error.message });
-    res.status(500).json({ success: false, error: error.message });
+    log.error('Failed to handle incoming call', { CallSid, error: error.message });
+    
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say('We apologize, but we are unable to connect your call at this time. Please try again later.');
+    twiml.hangup();
+    
+    res.type('text/xml');
+    res.send(twiml.toString());
   }
 });
 
-// TwiML response to connect patient to LiveKit via SIP
-app.post('/api/twiml/connect-sip', (req, res) => {
-  const { room } = req.query;
-  const sipUri = `sip:${room}@${process.env.LIVEKIT_SIP_DOMAIN}`;
+// TwiML to wait for provider to answer
+app.post('/api/twiml/wait-for-provider', (req, res) => {
+  const { callSid } = req.query;
   
-  log.info('Generating TwiML for SIP connection', { room, sipUri });
+  log.info('Patient waiting for provider', { callSid });
   
-  const twiml = new twilio.twiml.VoiceResponse();
-  twiml.say('Connecting you to your healthcare provider.');
+  const callInfo = incomingCalls.get(callSid);
+  if (!callInfo) {
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say('Call session expired. Please call again.');
+    twiml.hangup();
+    res.type('text/xml');
+    return res.send(twiml.toString());
+  }
   
-  // Connect directly to LiveKit SIP endpoint
-  const dial = twiml.dial({ timeout: 30 });
-  dial.sip(sipUri);
-  
-  res.type('text/xml');
-  res.send(twiml.toString());
+  // Check if provider has answered
+  if (callInfo.status === 'answered') {
+    const sipUri = `sip:${callInfo.roomName}@${process.env.LIVEKIT_SIP_DOMAIN}`;
+    log.info('Connecting patient to provider via SIP', { callSid, sipUri });
+    
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say('Connecting you to your healthcare provider now.');
+    
+    const dial = twiml.dial({ timeout: 30 });
+    dial.sip(sipUri);
+    
+    res.type('text/xml');
+    res.send(twiml.toString());
+  } else {
+    // Continue waiting
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.say('Please continue to hold. A provider will be with you shortly.');
+    twiml.pause({ length: 3 });
+    twiml.redirect(`/api/twiml/wait-for-provider?callSid=${callSid}`);
+    
+    res.type('text/xml');
+    res.send(twiml.toString());
+  }
 });
 
 // Handle call completion
@@ -119,31 +141,36 @@ app.post('/api/call-completed', (req, res) => {
 
 // Handle call status updates
 app.post('/api/call-status', async (req, res) => {
-  const { CallSid, CallStatus } = req.body;
+  const { CallSid, CallStatus, CallDuration } = req.body;
   
-  log.info('Call status update received', { CallSid, CallStatus });
-  
+  log.info('Call status update received', { CallSid, CallStatus, CallDuration });
+
+  // Update call log if exists
   const callLog = callLogs.find(log => log.id === CallSid);
   if (callLog) {
     callLog.status = CallStatus;
     callLog.lastUpdated = new Date().toISOString();
+    if (CallDuration) callLog.duration = CallDuration;
     log.info('Updated call log', { CallSid, newStatus: CallStatus });
-  } else {
-    log.warn('Call log not found for status update', { CallSid });
   }
   
-  // Clean up LiveKit room when call ends
+  // Clean up when call ends
   if (CallStatus === 'completed' || CallStatus === 'failed') {
+    // Clean up incoming calls
+    if (incomingCalls.has(CallSid)) {
+      log.info('Cleaning up incoming call', { CallSid });
+      incomingCalls.delete(CallSid);
+    }
+    
+    // Clean up active calls
     const callInfo = activeCalls.get(CallSid);
     if (callInfo) {
       try {
-        log.info('Cleaning up call resources', { CallSid, roomName: callInfo.roomName });
-        // Optionally end the LiveKit room
-        // await roomService.deleteRoom(callInfo.roomName);
+        log.info('Cleaning up active call resources', { CallSid, roomName: callInfo.roomName });
         activeCalls.delete(CallSid);
         log.info('Call cleanup completed', { CallSid });
       } catch (error) {
-        log.error('Error cleaning up room', { CallSid, error: error.message });
+        log.error('Error cleaning up call resources', { CallSid, error: error.message });
       }
     }
   }
@@ -151,37 +178,49 @@ app.post('/api/call-status', async (req, res) => {
   res.sendStatus(200);
 });
 
-// Get call logs for EHR
-app.get('/api/call-logs/:patientId', (req, res) => {
-  const { patientId } = req.params;
-  log.info('Retrieving call logs', { patientId });
+// Get call logs by phone number
+app.get('/api/call-logs/:phoneNumber', (req, res) => {
+  const { phoneNumber } = req.params;
+  log.info('Retrieving call logs by phone', { phoneNumber });
   
-  const logs = callLogs.filter(log => log.patientId === patientId);
-  log.info('Call logs retrieved', { patientId, logCount: logs.length });
+  const logs = callLogs.filter(log => log.patientPhone === phoneNumber);
+  log.info('Call logs retrieved', { phoneNumber, logCount: logs.length });
   
   res.json(logs);
 });
 
-// Get active calls for provider dashboard
-app.get('/api/active-calls/:providerId', (req, res) => {
-  const { providerId } = req.params;
-  log.info('Retrieving active calls for provider', { providerId });
+// Get all recent call logs for clinic dashboard
+app.get('/api/call-logs', (req, res) => {
+  log.info('Retrieving all call logs');
   
-  const providerCalls = [];
+  const recentLogs = callLogs
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    .slice(0, 50); // Last 50 calls
   
-  for (const [callId, callInfo] of activeCalls.entries()) {
-    if (callInfo.providerId === providerId) {
-      const callLog = callLogs.find(log => log.id === callId);
-      providerCalls.push({
-        callId,
-        ...callInfo,
-        status: callLog?.status || 'unknown'
+  log.info('All call logs retrieved', { logCount: recentLogs.length });
+  res.json(recentLogs);
+});
+
+// Get incoming calls waiting for provider
+app.get('/api/incoming-calls', (req, res) => {
+  log.info('Retrieving incoming calls');
+  
+  const waitingCalls = [];
+  
+  for (const [callSid, callInfo] of incomingCalls.entries()) {
+    if (callInfo.status === 'ringing') {
+      waitingCalls.push({
+        callSid,
+        patientPhone: callInfo.patientPhone,
+        roomName: callInfo.roomName,
+        timestamp: callInfo.timestamp,
+        waitTime: Math.floor((Date.now() - new Date(callInfo.timestamp).getTime()) / 1000)
       });
     }
   }
   
-  log.info('Active calls retrieved', { providerId, activeCallCount: providerCalls.length });
-  res.json(providerCalls);
+  log.info('Incoming calls retrieved', { waitingCallCount: waitingCalls.length });
+  res.json(waitingCalls);
 });
 
 // Generate LiveKit access token for healthcare workers
@@ -217,38 +256,53 @@ app.post('/api/livekit-token', (req, res) => {
   });
 });
 
-// Get call room info for provider to join
-app.get('/api/call-room/:callId', (req, res) => {
-  const { callId } = req.params;
-  log.info('Retrieving call room info', { callId });
+// Get active call info
+app.get('/api/active-calls', (req, res) => {
+  log.info('Retrieving all active calls');
   
-  const callInfo = activeCalls.get(callId);
+  const activeCallsList = [];
   
-  if (!callInfo) {
-    log.warn('Call room not found', { callId });
-    return res.status(404).json({ error: 'Call not found' });
+  for (const [callSid, callInfo] of activeCalls.entries()) {
+    activeCallsList.push({
+      callSid,
+      patientPhone: callInfo.patientPhone,
+      providerId: callInfo.providerId,
+      roomName: callInfo.roomName,
+      status: callInfo.status,
+      timestamp: callInfo.timestamp,
+      answeredAt: callInfo.answeredAt
+    });
   }
   
-  log.info('Call room info retrieved', { callId, roomName: callInfo.roomName });
-  res.json(callInfo);
+  log.info('Active calls retrieved', { activeCallCount: activeCallsList.length });
+  res.json(activeCallsList);
 });
 
-// Join existing call room (for providers)
-app.post('/api/join-call', async (req, res) => {
-  const { callId, providerId } = req.body;
+// Provider answers incoming call
+app.post('/api/answer-call', async (req, res) => {
+  const { callSid, providerId } = req.body;
   
-  log.info('Provider attempting to join call', { callId, providerId });
+  log.info('Provider answering incoming call', { callSid, providerId });
   
-  const callInfo = activeCalls.get(callId);
+  const callInfo = incomingCalls.get(callSid);
   if (!callInfo) {
-    log.warn('Call not found for provider join', { callId, providerId });
-    return res.status(404).json({ error: 'Call not found or ended' });
+    log.warn('Incoming call not found', { callSid, providerId });
+    return res.status(404).json({ error: 'Call not found or expired' });
   }
   
   try {
+    // Mark call as answered
+    callInfo.status = 'answered';
+    callInfo.providerId = providerId;
+    callInfo.answeredAt = new Date().toISOString();
+    
+    // Move to active calls
+    activeCalls.set(callSid, callInfo);
+    
+    // Generate token for provider
     const participantIdentity = `provider-${providerId}`;
-    log.info('Generating token for provider to join call', { 
-      callId, 
+    log.info('Generating token for provider to answer call', { 
+      callSid, 
       providerId, 
       roomName: callInfo.roomName,
       participantIdentity 
@@ -267,16 +321,29 @@ app.post('/api/join-call', async (req, res) => {
       canPublishData: true
     });
     
-    log.info('Provider successfully joined call', { callId, providerId, roomName: callInfo.roomName });
+    // Log the call
+    const callLog = {
+      id: callSid,
+      patientPhone: callInfo.patientPhone,
+      providerId,
+      roomName: callInfo.roomName,
+      status: 'answered',
+      timestamp: callInfo.timestamp,
+      answeredAt: callInfo.answeredAt
+    };
+    callLogs.push(callLog);
+    
+    log.info('Provider successfully answered call', { callSid, providerId, roomName: callInfo.roomName });
 
     res.json({
       success: true,
       token: token.toJwt(),
       wsUrl: process.env.LIVEKIT_WS_URL,
-      roomName: callInfo.roomName
+      roomName: callInfo.roomName,
+      patientPhone: callInfo.patientPhone
     });
   } catch (error) {
-    log.error('Failed to generate token for provider join', { callId, providerId, error: error.message });
+    log.error('Failed to answer call', { callSid, providerId, error: error.message });
     res.status(500).json({ error: error.message });
   }
 });
@@ -299,4 +366,6 @@ app.listen(port, () => {
     livekitConfigured: !!(process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET),
     sipDomain: process.env.LIVEKIT_SIP_DOMAIN || 'sip.livekit.cloud'
   });
+  log.info('Webhook URL for Twilio:', `http://localhost:${port}/api/incoming-call`);
+  log.info('Configure your Twilio phone number webhook to point to the above URL');
 });
