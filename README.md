@@ -2,6 +2,10 @@
 
 Direct Twilio-to-LiveKit SIP routing for telehealth calls.
 
+## ⚠️ Demo Only - Not Production Ready
+
+This application is for **demonstration purposes only** and should not be used in production environments. It lacks essential security features including authentication, authorization, CSRF protection, and proper error handling required for healthcare applications.
+
 ## Quick Start
 
 1. **Install:**
@@ -37,3 +41,13 @@ Direct Twilio-to-LiveKit SIP routing for telehealth calls.
 ## How It Works
 
 Patient calls → Twilio → LiveKit SIP → Room `twilio-tgl-{number}` → Provider joins via dashboard
+
+## Production Considerations
+
+Before using in production, implement:
+- User authentication and authorization
+- CSRF protection
+- Input validation and sanitization
+- Proper error handling and logging
+- HIPAA compliance measures
+- Rate limiting and security headers
