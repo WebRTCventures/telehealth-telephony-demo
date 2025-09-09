@@ -1,13 +1,14 @@
-# Telehealth Telephony Demo - Inbound Calls
+# Telehealth Telephony Demo - Direct SIP Routing
 
-Demo of inbound telephony integration where patients call the clinic and providers answer in their browser.
+Demo of direct Twilio-to-LiveKit SIP routing where patients call the clinic and are automatically routed to LiveKit rooms.
 
 ## Features
 
-- **Provider Dashboard**: Real-time incoming call notifications
-- **Twilio VoIP**: Patients call clinic PSTN number
-- **WebRTC**: Providers answer calls directly in browser
-- **Call Logging**: All call metadata automatically logged
+- **Direct SIP Routing**: Twilio routes calls directly to LiveKit SIP
+- **Auto Room Creation**: Calls create rooms with pattern `twilio-tgl-{caller_number}`
+- **Provider Dashboard**: Real-time monitoring of active LiveKit rooms
+- **WebRTC**: Providers join calls directly in browser
+- **No Webhooks**: Simplified architecture with direct SIP integration
 
 ## Setup
 
@@ -16,27 +17,27 @@ Demo of inbound telephony integration where patients call the clinic and provide
    npm install
    ```
 
-2. **Configure Twilio:**
+2. **Configure LiveKit SIP:**
+   - Set up SIP Trunk in LiveKit Console
+   - Configure Dispatch Rule: `twilio-tgl-{caller_number}`
+   - Note your SIP domain from LiveKit
+
+3. **Configure Twilio:**
    - Copy `.env.example` to `.env`
-   - Add your Twilio credentials:
+   - Add your credentials:
      ```
      TWILIO_ACCOUNT_SID=your_account_sid
      TWILIO_AUTH_TOKEN=your_auth_token
      TWILIO_PHONE_NUMBER=+1234567890
-     ```
-
-3. **Configure LiveKit:**
-   - Add LiveKit credentials to `.env`:
-     ```
+     LIVEKIT_WS_URL=wss://your-project.livekit.cloud
      LIVEKIT_API_KEY=your_livekit_api_key
      LIVEKIT_API_SECRET=your_livekit_api_secret
-     LIVEKIT_WS_URL=wss://your-project.livekit.cloud
-     LIVEKIT_SIP_DOMAIN=sip.livekit.cloud
+     LIVEKIT_SIP_DOMAIN=sip:your-domain.sip.livekit.cloud
      ```
 
-4. **Configure Twilio Webhook:**
-   - Set your Twilio phone number webhook URL to: `http://your-domain.com/api/incoming-call`
-   - For local testing, use ngrok: `ngrok http 3000`
+4. **Configure Twilio Phone Number:**
+   - Point your Twilio phone number directly to LiveKit SIP URI
+   - No webhook needed - direct SIP routing
 
 5. **Start the server:**
    ```bash
@@ -48,42 +49,45 @@ Demo of inbound telephony integration where patients call the clinic and provide
 
 ## How It Works
 
-1. Patient calls the clinic's phone number (PSTN)
-2. Twilio receives the call and puts patient on hold with music
-3. Provider dashboard shows incoming call notification in real-time
-4. Provider clicks "Answer Call" to join via WebRTC in browser
-5. Patient is connected to provider through LiveKit SIP bridge
-6. Call metadata is automatically logged in the system
+1. Patient calls the clinic's Twilio phone number
+2. Twilio routes call directly to LiveKit SIP endpoint
+3. LiveKit creates room: `twilio-tgl-{caller_number}`
+4. Provider dashboard detects new room with 1 participant
+5. Provider clicks "Answer Call" to join the room
+6. Both parties connected via LiveKit WebRTC
 
 ## API Endpoints
 
-- `POST /api/incoming-call` - Twilio webhook for incoming calls
-- `GET /api/incoming-calls` - Get waiting incoming calls
-- `POST /api/answer-call` - Provider answers incoming call
-- `GET /api/call-logs` - Retrieve all call history
-- `GET /api/call-logs/:phoneNumber` - Get logs for specific phone
-- `POST /api/call-status` - Webhook for call status updates
+- `GET /api/active-rooms` - Get active LiveKit rooms
+- `POST /api/join-room` - Provider joins LiveKit room
+- `POST /api/livekit-token` - Generate LiveKit access token
 
-## Setup Instructions
+## Configuration
 
-1. Configure your Twilio phone number webhook to: `http://your-domain.com/api/incoming-call`
-2. Ensure LiveKit SIP is properly configured
-3. Start the server and open the provider dashboard
-4. Patients can now call your Twilio number and you'll see incoming calls
+### Twilio Phone Number Setup
+Configure your Twilio phone number to route directly to:
+```
+sip:your-domain.sip.livekit.cloud
+```
+
+### LiveKit Dispatch Rule
+Set up dispatch rule in LiveKit Console:
+- Pattern: `twilio-tgl-{caller_number}`
+- This creates unique rooms for each caller
 
 ## Value to Clinic
 
-- **Universal Access**: Patients without internet can call from any phone
-- **Unified Interface**: Providers handle all calls in one browser dashboard
-- **No Validation Issues**: No outbound call restrictions or verification needed
-- **Cost Effective**: Patients use their existing phone service
-- **Professional**: Clinic maintains a single published phone number
+- **Simplified Architecture**: No webhooks or complex routing
+- **Direct Connection**: Minimal latency with direct SIP routing  
+- **Auto Scaling**: LiveKit handles room creation automatically
+- **Universal Access**: Patients call from any phone
+- **Real-time Dashboard**: Providers see incoming calls instantly
 
-**Call Flow**: Patient phone → PSTN → Twilio → LiveKit SIP → WebRTC → Provider browser
+**Call Flow**: Patient phone → PSTN → Twilio → LiveKit SIP → Room `twilio-tgl-{number}` → Provider WebRTC
 
 ## Demo Limitations
 
 - Uses in-memory storage (replace with database for production)
 - Simplified authentication (implement proper auth for production)
 - Basic error handling (enhance for production use)
-- No patient identification (enhance with caller ID lookup)
+- No call recording (add if required for compliance)

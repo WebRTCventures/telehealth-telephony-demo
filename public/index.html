@@ -55,8 +55,7 @@
         <div id="callLogs"></div>
     </div>
 
-    <script src="https://sdk.twilio.com/js/client/releases/1.14.0/twilio.min.js"></script>
-    <script src="https://unpkg.com/livekit-client/dist/livekit-client.umd.js"></script>
+    <script src="https://unpkg.com/livekit-client@1.15.13/dist/livekit-client.umd.js"></script>
     <script>
         const providerData = {
             providerId: 'PROV001'
@@ -66,58 +65,54 @@
         let currentCallSid = null;
         let currentRoomName = null;
 
-        // Check for incoming calls
+        // Check for active LiveKit rooms (incoming calls)
         async function checkIncomingCalls() {
             try {
-                const response = await fetch('/api/incoming-calls');
-                const incomingCalls = await response.json();
+                const response = await fetch('/api/active-rooms');
+                const activeRooms = await response.json();
                 
                 const incomingCallsDiv = document.getElementById('incomingCalls');
                 
-                if (incomingCalls.length === 0) {
+                // Filter rooms with only 1 participant (patient waiting)
+                const waitingCalls = activeRooms.filter(room => room.participantCount === 1);
+                
+                if (waitingCalls.length === 0) {
                     incomingCallsDiv.innerHTML = 'No incoming calls';
                 } else {
-                    incomingCallsDiv.innerHTML = incomingCalls.map(call => 
-                        `<div style="padding: 10px; border: 1px solid #007bff; margin: 5px 0; border-radius: 4px;">
-                            <strong>📞 Patient calling from: ${call.patientPhone}</strong><br>
-                            <small>Waiting: ${call.waitTime}s</small><br>
-                            <button onclick="answerCall('${call.callSid}')" class="call-button" style="margin-top: 5px;">Answer Call</button>
-                        </div>`
-                    ).join('');
+                    incomingCallsDiv.innerHTML = waitingCalls.map(room => {
+                        const waitTime = Math.floor((Date.now() - new Date(room.createdAt).getTime()) / 1000);
+                        return `<div style="padding: 10px; border: 1px solid #007bff; margin: 5px 0; border-radius: 4px;">
+                            <strong>📞 Patient calling from: ${room.phoneNumber}</strong><br>
+                            <small>Waiting: ${waitTime}s | Room: ${room.roomName}</small><br>
+                            <button onclick="joinRoom('${room.roomName}')" class="call-button" style="margin-top: 5px;">Answer Call</button>
+                        </div>`;
+                    }).join('');
                 }
             } catch (error) {
                 console.error('Failed to check incoming calls:', error);
             }
         }
 
-        // Check for active calls
-        async function checkActiveCalls() {
-            try {
-                const response = await fetch('/api/active-calls');
-                const activeCalls = await response.json();
-                
-                if (activeCalls.length > 0) {
-                    const activeCall = activeCalls[0];
-                    currentCallSid = activeCall.callSid;
-                    currentRoomName = activeCall.roomName;
-                    document.getElementById('webrtc-controls').style.display = 'block';
-                    updateCallStatus(`Active call with ${activeCall.patientPhone} - Room: ${activeCall.roomName}`);
-                }
-            } catch (error) {
-                console.error('Failed to check active calls:', error);
+        // Check if provider is in an active call
+        function checkActiveCall() {
+            if (videoRoom && videoRoom.state === 'connected') {
+                document.getElementById('webrtc-controls').style.display = 'block';
+                updateCallStatus(`Connected to room: ${currentRoomName}`);
+            } else {
+                document.getElementById('webrtc-controls').style.display = 'none';
             }
         }
 
-        // Answer incoming call
-        async function answerCall(callSid) {
+        // Join LiveKit room to answer call
+        async function joinRoom(roomName) {
             try {
-                showStatus('Answering call...', 'success');
+                showStatus('Joining call...', 'success');
                 
-                const response = await fetch('/api/answer-call', {
+                const response = await fetch('/api/join-room', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        callSid: callSid,
+                        roomName: roomName,
                         providerId: providerData.providerId
                     })
                 });
@@ -125,32 +120,25 @@
                 const result = await response.json();
                 
                 if (result.success) {
-                    currentCallSid = callSid;
-                    currentRoomName = result.roomName;
+                    currentRoomName = roomName;
+                    const phoneNumber = roomName.replace('twilio-tgl-', '');
                     
-                    showStatus(`Call answered - Patient: ${result.patientPhone}`, 'success');
+                    showStatus(`Joined call with ${phoneNumber}`, 'success');
                     document.getElementById('webrtc-controls').style.display = 'block';
-                    updateCallStatus(`Connected to patient ${result.patientPhone}`);
+                    updateCallStatus(`Connected to ${phoneNumber}`);
                     
-                    // Automatically join the LiveKit room
+                    // Join the LiveKit room
                     await connectToLiveKitRoom(result.token, result.wsUrl, result.roomName);
-                    
-                    loadCallLogs();
                 } else {
-                    showStatus(`Error answering call: ${result.error}`, 'error');
+                    showStatus(`Error joining call: ${result.error}`, 'error');
                 }
             } catch (error) {
                 showStatus(`Error: ${error.message}`, 'error');
             }
         }
 
-        // Join call via LiveKit (for manual connection)
+        // Manual join (not needed with auto-join)
         async function joinCall() {
-            if (!currentCallSid) {
-                updateCallStatus('No active call to join');
-                return;
-            }
-            
             updateCallStatus('Already connected to call');
         }
 
@@ -163,27 +151,15 @@
                 document.getElementById('video-room').innerHTML = '';
                 document.getElementById('video-room').style.display = 'none';
             }
-            currentCallSid = null;
             currentRoomName = null;
             document.getElementById('webrtc-controls').style.display = 'none';
+            showStatus('Call ended', 'success');
         }
 
-        // Load call logs
+        // Load call logs (simplified for demo)
         async function loadCallLogs() {
-            try {
-                const response = await fetch('/api/call-logs');
-                const logs = await response.json();
-                
-                const logsContainer = document.getElementById('callLogs');
-                logsContainer.innerHTML = logs.map(log => 
-                    `<div class="log-entry">
-                        <strong>${new Date(log.timestamp).toLocaleString()}</strong> - 
-                        Patient: ${log.patientPhone} | Status: ${log.status} | Duration: ${log.duration || 'N/A'}s
-                    </div>`
-                ).join('');
-            } catch (error) {
-                console.error('Failed to load call logs:', error);
-            }
+            const logsContainer = document.getElementById('callLogs');
+            logsContainer.innerHTML = '<div class="log-entry">Call logs will appear here after calls are completed</div>';
         }
 
         function showStatus(message, type) {
@@ -268,13 +244,13 @@
         // Initialize on page load
         window.addEventListener('load', () => {
             checkIncomingCalls();
-            checkActiveCalls();
+            checkActiveCall();
             loadCallLogs();
             
             // Poll for incoming calls every 2 seconds
             setInterval(checkIncomingCalls, 2000);
-            // Poll for active calls every 5 seconds
-            setInterval(checkActiveCalls, 5000);
+            // Check active call status every 3 seconds
+            setInterval(checkActiveCall, 3000);
         });
     </script>
 </body>
