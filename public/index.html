@@ -55,7 +55,7 @@
         <div id="callLogs"></div>
     </div>
 
-    <script src="https://unpkg.com/livekit-client@1.15.13/dist/livekit-client.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
     <script>
         const providerData = {
             providerId: 'PROV001'
@@ -174,9 +174,9 @@
         // Connect to LiveKit room
         async function connectToLiveKitRoom(token, wsUrl, roomName) {
             try {
-                videoRoom = new LiveKitClient.Room();
+                videoRoom = new LivekitClient.Room();
                 
-                videoRoom.on(LiveKitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
+                videoRoom.on(LivekitClient.RoomEvent.TrackSubscribed, (track, publication, participant) => {
                     if (track.kind === 'video' || track.kind === 'audio') {
                         const element = track.attach();
                         element.style.maxWidth = '300px';
@@ -185,15 +185,15 @@
                     }
                 });
                 
-                videoRoom.on(LiveKitClient.RoomEvent.ParticipantConnected, (participant) => {
+                videoRoom.on(LivekitClient.RoomEvent.ParticipantConnected, (participant) => {
                     updateCallStatus(`Participant joined: ${participant.identity}`);
                 });
                 
                 await videoRoom.connect(wsUrl, token);
                 
                 // Enable camera and microphone
-                const videoTrack = await LiveKitClient.createLocalVideoTrack();
-                const audioTrack = await LiveKitClient.createLocalAudioTrack();
+                const videoTrack = await LivekitClient.createLocalVideoTrack();
+                const audioTrack = await LivekitClient.createLocalAudioTrack();
                 
                 await videoRoom.localParticipant.publishTrack(videoTrack);
                 await videoRoom.localParticipant.publishTrack(audioTrack);
@@ -220,7 +220,7 @@
             }
             
             try {
-                const videoTrack = await LiveKitClient.createLocalVideoTrack();
+                const videoTrack = await LivekitClient.createLocalVideoTrack();
                 await videoRoom.localParticipant.publishTrack(videoTrack);
                 
                 const localVideo = videoTrack.attach();

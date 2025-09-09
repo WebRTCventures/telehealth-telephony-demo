@@ -54,56 +54,16 @@ app.get('/api/active-rooms', async (req, res) => {
   }
 });
 
-
-
-
-
-
-
-
-
-
-
-// Generate LiveKit access token for healthcare workers
-app.post('/api/livekit-token', (req, res) => {
-  const { participantName, roomName, participantType = 'provider' } = req.body;
-  
-  log.info('Generating LiveKit token', { participantName, roomName, participantType });
-  
-  if (!process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET) {
-    log.error('LiveKit credentials not configured');
-    return res.status(500).json({ error: 'LiveKit credentials not configured' });
-  }
-
-  const token = new AccessToken(process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET, {
-    identity: participantName,
-    ttl: '1h'
-  });
-
-  token.addGrant({
-    room: roomName,
-    roomJoin: true,
-    canPublish: true,
-    canSubscribe: true,
-    canPublishData: true
-  });
-  
-  log.info('LiveKit token generated successfully', { participantName, roomName });
-
-  res.json({ 
-    token: token.toJwt(),
-    wsUrl: process.env.LIVEKIT_WS_URL,
-    roomName
-  });
-});
-
-
-
 // Join LiveKit room (for provider to answer call)
 app.post('/api/join-room', async (req, res) => {
   const { roomName, providerId } = req.body;
   
   log.info('Provider joining room', { roomName, providerId });
+  
+  if (!process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET) {
+    log.error('LiveKit credentials not configured');
+    return res.status(500).json({ error: 'LiveKit credentials not configured' });
+  }
   
   try {
     const participantIdentity = `provider-${providerId}`;
@@ -121,6 +81,12 @@ app.post('/api/join-room', async (req, res) => {
       canPublishData: true
     });
     
+    const jwtToken = await token.toJwt();
+    
+    if (!jwtToken) {
+      throw new Error('Failed to generate JWT token');
+    }
+    
     // Track active call
     const phoneNumber = roomName.replace('twilio-tgl-', '');
     activeCalls.set(roomName, {
@@ -130,16 +96,16 @@ app.post('/api/join-room', async (req, res) => {
       joinedAt: new Date().toISOString()
     });
     
-    log.info('Provider token generated', { roomName, providerId });
+    log.info('Provider token generated', { roomName, providerId, tokenLength: jwtToken.length });
 
     res.json({
       success: true,
-      token: token.toJwt(),
+      token: jwtToken,
       wsUrl: process.env.LIVEKIT_WS_URL,
       roomName
     });
   } catch (error) {
-    log.error('Failed to join room', { roomName, providerId, error: error.message });
+    log.error('Failed to join room', { roomName, providerId, error: error.message, stack: error.stack });
     res.status(500).json({ error: error.message });
   }
 });
