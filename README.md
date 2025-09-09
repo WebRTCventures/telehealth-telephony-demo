@@ -26,11 +26,11 @@ This application is for **demonstration purposes only** and should not be used i
    ```
 
 3. **Configure LiveKit:**
-   - Create SIP Trunk in LiveKit Console
-   - Set Dispatch Rule: `twilio-tgl-{caller_number}`
+   - Create [SIP Trunk](https://docs.livekit.io/sip/trunk-inbound/) in LiveKit Console
+   - Set [Dispatch Rule](https://docs.livekit.io/sip/dispatch-rule/) to create the room: `twilio-tgl-{caller_number}`
 
 4. **Configure Twilio:**
-   - Point phone number to: `sip:your-domain.sip.livekit.cloud`
+   - Configure [Twilio Trunk](https://docs.livekit.io/sip/quickstarts/configuring-twilio-trunk/) to: `sip:your-domain.sip.livekit.cloud`
 
 5. **Run:**
    ```bash
